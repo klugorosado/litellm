@@ -12,7 +12,12 @@ sys.path.insert(0, os.path.abspath("../../../../.."))
 from litellm.llms.anthropic.experimental_pass_through.adapters.streaming_iterator import (
     AnthropicStreamWrapper,
 )
-from litellm.types.utils import Delta, StreamingChoices, Usage
+from litellm.types.utils import (
+    Delta,
+    PromptTokensDetailsWrapper,
+    StreamingChoices,
+    Usage,
+)
 
 
 def _make_text_chunk(
@@ -114,6 +119,45 @@ async def test_stream_emits_compaction_block_before_text():
     assert iterations[1]["type"] == "message"
     assert iterations[1]["input_tokens"] == 10
     assert iterations[1]["output_tokens"] == 5
+
+
+@pytest.mark.asyncio
+async def test_message_delta_emits_cache_read_for_openai_shaped_usage():
+    """OpenAI-shaped backends (e.g. GitHub Copilot) report cached prompt tokens via
+    ``prompt_tokens_details.cached_tokens`` and leave the private
+    ``_cache_read_input_tokens`` at 0. Copilot streams the tail as a finish_reason
+    chunk followed by a *separate* usage-only chunk, which drives
+    ``_merge_usage_into_held_stop_reason_chunk``. The merged ``message_delta`` must
+    still surface ``cache_read_input_tokens`` so Claude Code's ``/context`` counts
+    cached context instead of only the uncached remainder."""
+
+    async def mock_stream():
+        yield _make_text_chunk("OK")
+        # Copilot/OpenAI split the tail: a finish_reason chunk with no usage ...
+        yield _make_text_chunk("", finish_reason="stop")
+        # ... followed by a separate usage-only chunk.
+        yield _make_text_chunk(
+            "",
+            usage=Usage(
+                prompt_tokens=1200,
+                completion_tokens=50,
+                total_tokens=1250,
+                prompt_tokens_details=PromptTokensDetailsWrapper(cached_tokens=1000),
+            ),
+        )
+
+    wrapper = AnthropicStreamWrapper(
+        completion_stream=mock_stream(),
+        model="claude-opus-4.8",
+    )
+
+    events = await _collect_events_async(wrapper)
+
+    message_delta = next(e for e in events if e.get("type") == "message_delta")
+    usage = message_delta["usage"]
+    # input_tokens is the uncached remainder (1200 - 1000); cache_read carries the rest.
+    assert usage["input_tokens"] == 200
+    assert usage["cache_read_input_tokens"] == 1000
 
 
 @pytest.mark.asyncio
