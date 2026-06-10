@@ -3,6 +3,8 @@ import sys
 import os
 from types import ModuleType, SimpleNamespace
 
+import pytest
+
 sys.path.insert(
     0, os.path.abspath("../../..")
 )  # Adds the parent directory to the system path
@@ -363,5 +365,68 @@ def test_initialize_callbacks_on_proxy_lakera_ignores_non_dict_callback_settings
         )
         assert captured["kwargs"] == {}
         assert any(isinstance(c, _DummyLakera) for c in litellm.callbacks)
+    finally:
+        litellm.callbacks = original_callbacks
+
+
+# Every callback that reads its init params from callback_specific_params. Since
+# #29590 forwards the full callback_settings dict here, a non-dict value under
+# any of these keys must be ignored, not fed into init. A new consumer is covered
+# by adding its dispatch name to this list.
+CALLBACK_SETTINGS_CONSUMERS = [
+    "presidio",
+    "lakera_prompt_injection",
+    "datadog_cost_management",
+    "compression_interception",
+    "websearch_interception",
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("callback_name", CALLBACK_SETTINGS_CONSUMERS)
+@pytest.mark.parametrize("non_dict_value", [True, "not-a-dict"])
+async def test_initialize_callbacks_on_proxy_tolerates_non_dict_callback_settings(
+    monkeypatch, callback_name, non_dict_value
+):
+    """Regression (#29590): a non-dict value under any callback_settings consumer
+    key must not crash initialize_callbacks_on_proxy at proxy startup.
+
+    Forwarding callback_settings as callback_specific_params makes every consumer
+    that reads its key see real config. Without an isinstance(dict) guard a scalar
+    reaches **-unpack or .get() and raises (TypeError / AttributeError) before the
+    proxy can boot. Runs inside an event loop because DatadogCostManagementLogger
+    schedules async work in __init__.
+    """
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm.proxy.proxy_server",
+        SimpleNamespace(prisma_client=None),
+    )
+
+    class _DummyLakera:
+        def __init__(self, **kwargs):
+            pass
+
+    fake_lakera = ModuleType("litellm.proxy.guardrails.guardrail_hooks.lakera_ai")
+    fake_lakera.lakeraAI_Moderation = _DummyLakera
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm.proxy.guardrails.guardrail_hooks.lakera_ai",
+        fake_lakera,
+    )
+
+    original_callbacks = (
+        list(litellm.callbacks) if isinstance(litellm.callbacks, list) else []
+    )
+    litellm.callbacks = []
+    try:
+        initialize_callbacks_on_proxy(
+            value=[callback_name],
+            premium_user=True,
+            config_file_path=".",
+            litellm_settings={},
+            callback_specific_params={callback_name: non_dict_value},
+        )
+        assert len(litellm.callbacks) == 1
     finally:
         litellm.callbacks = original_callbacks
