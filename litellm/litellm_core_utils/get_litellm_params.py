@@ -4,7 +4,7 @@ from litellm.llms.openai.data_residency import infer_openai_data_residency
 
 # Pre-define optional kwargs keys as frozenset for O(1) lookups
 # These are extracted from kwargs only if present, avoiding unnecessary .get() calls
-_OPTIONAL_KWARGS_KEYS = frozenset(
+OPTIONAL_KWARGS_KEYS = frozenset(
     {
         "azure_ad_token",
         "tenant_id",
@@ -36,6 +36,9 @@ _OPTIONAL_KWARGS_KEYS = frozenset(
         "rpm",
     }
 )
+
+# Backward-compatible alias for existing imports/tests.
+_OPTIONAL_KWARGS_KEYS = OPTIONAL_KWARGS_KEYS
 
 
 def _get_base_model_from_litellm_call_metadata(
@@ -164,7 +167,7 @@ def get_litellm_params(
 
     # Sparse extraction: only add kwargs keys that are actually present
     if kwargs:
-        for key in _OPTIONAL_KWARGS_KEYS:
+        for key in OPTIONAL_KWARGS_KEYS:
             if key in kwargs:
                 litellm_params[key] = kwargs[key]
 
